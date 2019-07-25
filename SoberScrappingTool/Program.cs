@@ -11,83 +11,128 @@ using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Diagnostics;
 using System.Threading;
+using System.Configuration;
+using System.Net.Mail;
+using System.Net;
 
 namespace SoberScrappingTool
 {
     class Program
     {
         private static string DateFormatWanted = "dd/MM/yyyy HH:mm:ss";
+        private static string SearchKeywordString = ConfigurationManager.AppSettings["searchKeywords"];
+        private static string EmailAddressToSend = ConfigurationManager.AppSettings["emailAddressToSend"];
+        private static string SmtpUsername = ConfigurationManager.AppSettings["smtpUsername"];
+        private static string SmtpPassword = ConfigurationManager.AppSettings["smtpPassword"];
+        private static string SmtpHost = ConfigurationManager.AppSettings["smtpHost"];
+        private static int SmtpPort = Convert.ToInt32(ConfigurationManager.AppSettings["smtpPort"]);
         
+
         static void Main(string[] args)
         {
-            // using this...
-            IWebDriver webDriver = new ChromeDriver();
-            
-            if(args.Length != 1)
+            var allKeywords = new List<string>();
+            if (args.Length == 1)
             {
-                Console.WriteLine("Enter only one keyword to search for...");
-                return;
+                Console.WriteLine($"Will search only for keyword:{args[0]}");
+                allKeywords.Add(args[0]);
             }
-            var searchKeyword = args[0];
-
-
-            webDriver.Url = $@"https://diavgeia.gov.gr/search?query=q:%22{searchKeyword}%22&page=0&sort=recent";
-
-            var ispageLoad = new WebDriverWait(webDriver, TimeSpan.FromSeconds(120))
-                .Until(d => ((IJavaScriptExecutor)d).ExecuteScript("return document.readyState").Equals("complete"));
-
-            if (ispageLoad)
-                Console.WriteLine("Page completely loaded");
             else
             {
-                Console.WriteLine("Page could not be loaded in 2minutes, maybe site is down.");
-                return;
-            }
-            Thread.Sleep(10000);
-            var results = webDriver.FindElements(By.CssSelector(".row-fluid.search-rows"));
-            if(results?.Count <= 0)
-            {
-                Console.WriteLine($"Nothing was found at {DateTime.Now} for keyword:{searchKeyword}");
-                return;
-            }
-            Console.WriteLine($"Found total of {results?.Count} in Page 1 of diavgeia for keyword:{searchKeyword}");
-
-
-            var excelFile = OpenOrCreateDefaultExcel();
-
-            if (!File.Exists(excelFile.FullName))
-            {
-                InitExcelFile(excelFile);
-            }
-
-            var dataRowsToUpdate = new Dictionary<int, CustomExcelRow>();
-            var dataRowsToAdd = new List<CustomExcelRow>();
-            foreach (var result in results)
-            {
-                var excelRowObject = ExtraExcelRowForResult(result);
-                if(excelRowObject == null)
+                allKeywords = SearchKeywordString?.Split(';').ToList();
+                if (allKeywords != null && allKeywords.Any())
                 {
-                    continue;
+                    Console.WriteLine("Start searching for keywords found in configuration...");
                 }
+                
+            }
 
-                (int row, Status status) = SearchInExcel(excelRowObject.Code, excelFile, excelRowObject.LastDateChanged);
-                if(status == Status.Add)
+            var totalNew = new List<CustomExcelRow>();
+            var totalUpdates = new List<CustomExcelRow>();
+            foreach (var searchKeyword in allKeywords)
+            {
+                Console.WriteLine($"Start searching for {searchKeyword}");
+                IReadOnlyCollection<IWebElement> results = null;
+                using (IWebDriver webDriver = new ChromeDriver())
                 {
-                    dataRowsToAdd.Add(excelRowObject);
-                }
-                if(status == Status.Update)
-                {
-                    dataRowsToUpdate.Add(row, excelRowObject);
+
+                    webDriver.Url = $@"https://diavgeia.gov.gr/search?query=q:%22{searchKeyword}%22&page=0&sort=recent";
+
+                    var ispageLoad = new WebDriverWait(webDriver, TimeSpan.FromSeconds(120))
+                        .Until(d => ((IJavaScriptExecutor)d).ExecuteScript("return document.readyState").Equals("complete"));
+
+                    if (ispageLoad)
+                        Console.WriteLine("Page completely loaded");
+                    else
+                    {
+                        Console.WriteLine("Page could not be loaded in 2minutes, maybe site is down.");
+                        return;
+                    }
+
+                    
+                    var waitMore = new WebDriverWait(webDriver, TimeSpan.FromSeconds(120));
+                    IWebElement autocomplete = waitMore.Until(x => x.FindElement(By.ClassName("pagination")));
+
+
+                    Thread.Sleep(15000);
+                    results = webDriver.FindElements(By.CssSelector(".row-fluid.search-rows"));
+
+
+                    if (results?.Count <= 0)
+                    {
+                        Console.WriteLine($"Nothing was found at {DateTime.Now} for keyword:{searchKeyword}");
+                        return;
+                    }
+                    Console.WriteLine($"Found total of {results?.Count} in Page 1 of diavgeia for keyword:{searchKeyword}");
+
+
+                    var excelFile = OpenOrCreateDefaultExcel();
+
+                    if (!File.Exists(excelFile.FullName))
+                    {
+                        InitExcelFile(excelFile);
+                    }
+
+                    var dataRowsToUpdate = new Dictionary<int, CustomExcelRow>();
+                    var dataRowsToAdd = new List<CustomExcelRow>();
+                    foreach (var result in results)
+                    {
+                        var excelRowObject = ExtraExcelRowForResult(result);
+                        if (excelRowObject == null)
+                        {
+                            continue;
+                        }
+
+                        (int row, Status status) = SearchInExcel(excelRowObject.Code, excelFile, excelRowObject.LastDateChanged);
+                        if (status == Status.Add)
+                        {
+                            dataRowsToAdd.Add(excelRowObject);
+                        }
+                        if (status == Status.Update)
+                        {
+                            dataRowsToUpdate.Add(row, excelRowObject);
+                        }
+                    }
+
+                    totalNew.AddRange(dataRowsToAdd);
+                    AddResultToExcel(excelFile, dataRowsToAdd, searchKeyword);
+
+                    totalUpdates.AddRange(dataRowsToUpdate.Select(z => z.Value));
+                    UpdateResultToExcel(excelFile, dataRowsToUpdate, searchKeyword);
+
+                    Console.WriteLine($"New Praxis found:{dataRowsToAdd.Count}");
+                    Console.WriteLine($"Updated a Praxis with changed date:{dataRowsToUpdate.Count}");
+
                 }
             }
 
-            AddResultToExcel(excelFile, dataRowsToAdd, searchKeyword);
 
-            // peding is the update.
-            UpdateResultToExcel(excelFile, dataRowsToUpdate, searchKeyword);
+            //count and send email.
+            if(totalNew.Any() || totalUpdates.Any())
+            {
+                // fix the format of body.
+                SendEmail($"We got new incoming: new={totalNew.Count} updated={totalUpdates.Count}");
+            }
 
-            Console.WriteLine($"New Praxis found:{dataRowsToAdd.Count}");
-            Console.WriteLine($"Updated a Praxis with changed date:{dataRowsToUpdate.Count}");
             Console.WriteLine("");
             Console.WriteLine("Copyright: outofmemo");
         }
@@ -262,6 +307,34 @@ namespace SoberScrappingTool
                 worksheet.Cells[headerRange].LoadFromArrays(headerRow);
 
                 excel.SaveAs(excelInfo);
+            }
+
+        }
+
+        private static void SendEmail(string body)
+        {
+
+            var fromAddress = new MailAddress(SmtpUsername, "No-Reply Sober Scrapping");
+            var toAddress = new MailAddress(EmailAddressToSend, "Mega EL");
+            string subject = "Sober Scrapping: " + DateTime.Now.Date.ToString("dd/MM/yyyy");
+            
+            var smtp = new SmtpClient
+            {
+                Host = SmtpHost,
+                Port = SmtpPort,
+                EnableSsl = true,
+                DeliveryMethod = SmtpDeliveryMethod.Network,
+                UseDefaultCredentials = false,
+                Credentials = new NetworkCredential(fromAddress.Address, SmtpPassword),
+                
+            };
+            using (var message = new MailMessage(fromAddress, toAddress)
+            {
+                Subject = subject,
+                Body = body
+            })
+            {
+                smtp.Send(message);
             }
 
         }
