@@ -52,7 +52,13 @@ namespace SoberScrappingTool
             {
                 Console.WriteLine($"Start searching for {searchKeyword}");
                 IReadOnlyCollection<IWebElement> results = null;
-                using (IWebDriver webDriver = new ChromeDriver())
+
+                var chromeOptions = new ChromeOptions();
+#if !DEBUG
+                chromeOptions.AddArguments("headless");
+#endif
+
+                using (IWebDriver webDriver = new ChromeDriver(chromeOptions))
                 {
 
                     webDriver.Url = $@"https://diavgeia.gov.gr/search?query=q:%22{searchKeyword}%22&page=0&sort=recent";
@@ -67,11 +73,6 @@ namespace SoberScrappingTool
                         Console.WriteLine("Page could not be loaded in 2minutes, maybe site is down.");
                         return;
                     }
-
-                    
-                    var waitMore = new WebDriverWait(webDriver, TimeSpan.FromSeconds(120));
-                    IWebElement autocomplete = waitMore.Until(x => x.FindElement(By.ClassName("pagination")));
-
 
                     Thread.Sleep(15000);
                     results = webDriver.FindElements(By.CssSelector(".row-fluid.search-rows"));
@@ -129,8 +130,11 @@ namespace SoberScrappingTool
             //count and send email.
             if(totalNew.Any() || totalUpdates.Any())
             {
+#if !DEBUG
                 // fix the format of body.
-                SendEmail($"We got new incoming: new={totalNew.Count} updated={totalUpdates.Count}");
+                SendEmail($"We got new incoming for some keywords: new={totalNew.Count} updated={totalUpdates.Count} <br/>" +
+                    $" Please check the xls document.<br/><br/>Cheers!");
+#endif
             }
 
             Console.WriteLine("");
@@ -251,7 +255,7 @@ namespace SoberScrappingTool
                 var worksheet = excel.Workbook.Worksheets["Worksheet1"];
 
                 var foundRow = worksheet.Cells["A:A"]
-                                .Where(cell => cell.Value.ToString() == code)
+                                .Where(cell => cell.Text.ToString().Replace(" ", "") == code.Replace(" ", ""))
                                 .Select(z => z.Start.Row)
                                 .FirstOrDefault();
 
@@ -317,7 +321,7 @@ namespace SoberScrappingTool
             var fromAddress = new MailAddress(SmtpUsername, "No-Reply Sober Scrapping");
             var toAddress = new MailAddress(EmailAddressToSend, "Mega EL");
             string subject = "Sober Scrapping: " + DateTime.Now.Date.ToString("dd/MM/yyyy");
-            
+
             var smtp = new SmtpClient
             {
                 Host = SmtpHost,
@@ -326,16 +330,26 @@ namespace SoberScrappingTool
                 DeliveryMethod = SmtpDeliveryMethod.Network,
                 UseDefaultCredentials = false,
                 Credentials = new NetworkCredential(fromAddress.Address, SmtpPassword),
-                
+
             };
             using (var message = new MailMessage(fromAddress, toAddress)
             {
                 Subject = subject,
-                Body = body
+                Body = body,
+                IsBodyHtml = true,
             })
             {
                 smtp.Send(message);
             }
+
+
+            //var client = new SmtpClient("smtp.gmail.com", 587)
+            //{
+            //    Credentials = new NetworkCredential(SmtpUsername, SmtpPassword),
+            //    EnableSsl = true
+            //};
+            //client.Send("no-reply-sober-scrapping@gmail.com", "argigero@gmail.com", subject, body);
+
 
         }
     }
