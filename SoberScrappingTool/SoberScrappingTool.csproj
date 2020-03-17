@@ -54,8 +54,13 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Models\CustomExcelRow.cs" />
+    <Compile Include="Services\EmailService.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="Models\ScrappedResults.cs" />
+    <Compile Include="Models\Status.cs" />
+    <Compile Include="Services\DiageiaScrappingService.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />

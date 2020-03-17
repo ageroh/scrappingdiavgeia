@@ -2,18 +2,16 @@
 using OpenQA.Selenium;
 using OpenQA.Selenium.Chrome;
 using OpenQA.Selenium.Support.UI;
+using SoberScrappingTool.Models;
+using SoberScrappingTool.Services;
 using System;
 using System.Collections.Generic;
+using System.Configuration;
 using System.IO;
 using System.Linq;
-using System.Text;
 using System.Text.RegularExpressions;
-using System.Threading.Tasks;
-using System.Diagnostics;
 using System.Threading;
-using System.Configuration;
-using System.Net.Mail;
-using System.Net;
+using System.Threading.Tasks;
 
 namespace SoberScrappingTool
 {
@@ -21,14 +19,80 @@ namespace SoberScrappingTool
     {
         private static string DateFormatWanted = "dd/MM/yyyy HH:mm:ss";
         private static string SearchKeywordString = ConfigurationManager.AppSettings["searchKeywords"];
-        private static string EmailAddressToSend = ConfigurationManager.AppSettings["emailAddressToSend"];
-        private static string SmtpUsername = ConfigurationManager.AppSettings["smtpUsername"];
-        private static string SmtpPassword = ConfigurationManager.AppSettings["smtpPassword"];
-        private static string SmtpHost = ConfigurationManager.AppSettings["smtpHost"];
-        private static int SmtpPort = Convert.ToInt32(ConfigurationManager.AppSettings["smtpPort"]);
-        
+
 
         static void Main(string[] args)
+        {
+            var allKeywords = SetupKeywords(args);
+            var emailService = new EmailService(ConfigurationManager.AppSettings);
+
+            var results = new List<ScrappedResults>();
+            var scrappingService = new DiageiaScrappingService();
+
+            try
+            {
+                var excelFile = OpenOrCreateDefaultExcel();
+                if (!File.Exists(excelFile.FullName))
+                {
+                    InitExcelFile(excelFile);
+                }
+
+                foreach (var searchKeyword in allKeywords)
+                {
+                    Console.WriteLine($"Start searching for {searchKeyword}");
+
+                    var customExcelRows = scrappingService.SearchForKeyword(searchKeyword);
+
+                    var scrappedResult = SearchAndScrapResults(customExcelRows, excelFile, searchKeyword);
+
+                    results.Add(scrappedResult);
+                }
+
+                AddOrUpdateExcelResults(results, excelFile);
+
+                //count and send email.
+                if (results.Any(z => z.DataRowsToUpdate.Any()) || results.Any(z => z.DataRowsToAdd.Any()))
+                {
+                    // fix the format of body.
+                    emailService.SendEmail(
+                        $"We got new incoming for some keywords: <br/>" +
+                        $"New found={results.Sum(z => z.DataRowsToAdd.Count)} <br/>" +
+                        $"Updated total={results.Sum(z => z.DataRowsToUpdate.Count)} <br/>" +
+                        $"Searched for keywords: {string.Join(",", allKeywords)}. " +
+                        $"Please check the xls document.<br/><br/>Cheers!<br/>");
+                }
+                else
+                {
+                    Console.WriteLine($"Nothing new or update found for keywords: {string.Join(",", allKeywords)} at {DateTime.UtcNow.ToShortDateString()}");
+                }
+            }
+            catch (Exception e)
+            {
+                emailService.SendEmail("Error: " + e.ToString(), "Some error occurred while scrapping.");
+            }
+
+            Console.WriteLine("");
+            Console.WriteLine($"Copyleft {DateTime.UtcNow.Year}: outofmemo");
+        }
+
+
+
+        private static void AddOrUpdateExcelResults(List<ScrappedResults> results, FileInfo excelInfo)
+        {
+            foreach(var result in results)
+            {
+                if(result.DataRowsToAdd?.Any() ?? false)
+                {
+                    AddResultToExcel(excelInfo, result.DataRowsToAdd, result.SearchKeyword);
+                }
+                if(result.DataRowsToUpdate?.Values?.Any() ?? false)
+                {
+                    UpdateResultToExcel(excelInfo, result.DataRowsToUpdate, result.SearchKeyword);
+                }
+            }
+        }
+
+        private static List<string> SetupKeywords(string[] args)
         {
             var allKeywords = new List<string>();
             if (args.Length == 1)
@@ -43,102 +107,10 @@ namespace SoberScrappingTool
                 {
                     Console.WriteLine("Start searching for keywords found in configuration...");
                 }
-                
+
             }
 
-            var totalNew = new List<CustomExcelRow>();
-            var totalUpdates = new List<CustomExcelRow>();
-            foreach (var searchKeyword in allKeywords)
-            {
-                Console.WriteLine($"Start searching for {searchKeyword}");
-                IReadOnlyCollection<IWebElement> results = null;
-
-                var chromeOptions = new ChromeOptions();
-#if !DEBUG
-                chromeOptions.AddArguments("headless");
-#endif
-
-                using (IWebDriver webDriver = new ChromeDriver(chromeOptions))
-                {
-
-                    webDriver.Url = $@"https://diavgeia.gov.gr/search?query=q:%22{searchKeyword}%22&page=0&sort=recent";
-
-                    var ispageLoad = new WebDriverWait(webDriver, TimeSpan.FromSeconds(120))
-                        .Until(d => ((IJavaScriptExecutor)d).ExecuteScript("return document.readyState").Equals("complete"));
-
-                    if (ispageLoad)
-                        Console.WriteLine("Page completely loaded");
-                    else
-                    {
-                        Console.WriteLine("Page could not be loaded in 2minutes, maybe site is down.");
-                        return;
-                    }
-
-                    Thread.Sleep(15000);
-                    results = webDriver.FindElements(By.CssSelector(".row-fluid.search-rows"));
-
-
-                    if (results?.Count <= 0)
-                    {
-                        Console.WriteLine($"Nothing was found at {DateTime.Now} for keyword:{searchKeyword}");
-                        return;
-                    }
-                    Console.WriteLine($"Found total of {results?.Count} in Page 1 of diavgeia for keyword:{searchKeyword}");
-
-
-                    var excelFile = OpenOrCreateDefaultExcel();
-
-                    if (!File.Exists(excelFile.FullName))
-                    {
-                        InitExcelFile(excelFile);
-                    }
-
-                    var dataRowsToUpdate = new Dictionary<int, CustomExcelRow>();
-                    var dataRowsToAdd = new List<CustomExcelRow>();
-                    foreach (var result in results)
-                    {
-                        var excelRowObject = ExtraExcelRowForResult(result);
-                        if (excelRowObject == null)
-                        {
-                            continue;
-                        }
-
-                        (int row, Status status) = SearchInExcel(excelRowObject.Code, excelFile, excelRowObject.LastDateChanged);
-                        if (status == Status.Add)
-                        {
-                            dataRowsToAdd.Add(excelRowObject);
-                        }
-                        if (status == Status.Update)
-                        {
-                            dataRowsToUpdate.Add(row, excelRowObject);
-                        }
-                    }
-
-                    totalNew.AddRange(dataRowsToAdd);
-                    AddResultToExcel(excelFile, dataRowsToAdd, searchKeyword);
-
-                    totalUpdates.AddRange(dataRowsToUpdate.Select(z => z.Value));
-                    UpdateResultToExcel(excelFile, dataRowsToUpdate, searchKeyword);
-
-                    Console.WriteLine($"New Praxis found:{dataRowsToAdd.Count}");
-                    Console.WriteLine($"Updated a Praxis with changed date:{dataRowsToUpdate.Count}");
-
-                }
-            }
-
-
-            //count and send email.
-            if(totalNew.Any() || totalUpdates.Any())
-            {
-#if !DEBUG
-                // fix the format of body.
-                SendEmail($"We got new incoming for some keywords: new={totalNew.Count} updated={totalUpdates.Count} <br/>" +
-                    $" Please check the xls document.<br/><br/>Cheers!");
-#endif
-            }
-
-            Console.WriteLine("");
-            Console.WriteLine("Copyright: outofmemo");
+            return allKeywords;
         }
 
         private static void UpdateResultToExcel(FileInfo excelFile, Dictionary<int, CustomExcelRow> dataRowsToUpdate, string searchKeyword)
@@ -181,71 +153,61 @@ namespace SoberScrappingTool
                         , cellData.Description
                         , cellData.LastDateChanged.ToString(DateFormatWanted)
                         , cellData.Type
-                        , cellData.Categories 
+                        , cellData.Categories
                         , cellData.Pdf
                         , searchKeyword
                         //"Code", "Provider", "Description", "Last Date Changed", "Type", "Categories", "Pdf"
                     });
                 }
 
-                worksheet.Cells[2, 1].LoadFromArrays(allCellData);
+                var lastRow = GetExcelLastEmptyRowNumber(worksheet);
+
+                worksheet.Cells[lastRow, 1].LoadFromArrays(allCellData);
                 excel.Save();
             }
         }
 
-        private static CustomExcelRow ExtraExcelRowForResult(IWebElement result)
+        private static int GetExcelLastEmptyRowNumber(ExcelWorksheet worksheet)
         {
-            // search if already exists in file.
-            if (!result.Text.Contains("Ημ/νία τελευταίας τροποποίησης:"))
+            int i = 1;
+            while (i < 10000)
             {
-                Console.WriteLine("Not found excpected date format, missing Ημ/νία τελευταίας τροποποίησης...");
-                return null;
+                if (string.IsNullOrWhiteSpace(worksheet.Cells[i, 1]?.Value?.ToString()))
+                {
+                    return i;
+                }
+                i++;
+            }
+            return i;
+        }
+
+
+        private static ScrappedResults SearchAndScrapResults(IEnumerable<CustomExcelRow> customExcelRows, FileInfo excelFile, string keyword)
+        {
+
+            var dataRowsToUpdate = new Dictionary<int, CustomExcelRow>();
+            var dataRowsToAdd = new List<CustomExcelRow>();
+
+            // todo: make this happen in SearchInExcel not as a foreach to avoid i/o.
+            foreach (var excelRowObject in customExcelRows)
+            {
+                (int row, Status status) = SearchInExcel(excelRowObject.Code, excelFile, excelRowObject.LastDateChanged);
+                if (status == Status.Add)
+                {
+                    dataRowsToAdd.Add(excelRowObject);
+                }
+                if (status == Status.Update)
+                {
+                    dataRowsToUpdate.Add(row, excelRowObject);
+                }
             }
 
-            if(!DateTime.TryParseExact(
-                result.Text.Substring(result.Text.IndexOf("Ημ/νία τελευταίας τροποποίησης:") + 32, 19)
-                , DateFormatWanted
-                ,null
-                , System.Globalization.DateTimeStyles.None, out var lastDateChanged))
+            return new ScrappedResults
             {
-                Console.WriteLine("Not correct date. for result: " + result.Text);
-                return null;
-            }
-
-            string pattern = @"[Α-Ζ]+\: [0-9α-ωΑ-Ωa-fA-F]{4,14}-[0-9α-ωΑ-Ωa-fA-F]{1,4}";
-            var patternMatchCode = Regex.Match(result.Text, pattern);
-            if (!patternMatchCode.Success)
-            {
-                Console.WriteLine($"For result {result.TagName} we cannot find code for document.");
-                return null;
-            }
-
-            var descriptionWithCode = result.FindElement(By.CssSelector("a[title='Προβολή πράξης']")).Text;
-            var descriptionWithoutCode = descriptionWithCode.Substring(descriptionWithCode.IndexOf(" - ") + 3);
-
-            var providerLink = result.FindElement(By.CssSelector("a[title*='Μετάβαση στη σελίδα του φορέα']"));
-            var providerLinkName = providerLink.Text;
-
-            var type = result.FindElement(By.CssSelector("a[title*='Αναζήτηση στο είδος πράξης']"));
-            var TypeText = type.Text;
-
-            var pdfLink = result.FindElement(By.CssSelector("a[title='Λήψη αρχείου']"));
-            var pdf = pdfLink.GetAttribute("href");
-
-
-            // "Code", "Provider", "Description", "Last Date Changed", "Type", "Categories", "Pdf"
-
-            return new CustomExcelRow
-            {
-                Code = patternMatchCode.Value,
-                LastDateChanged = lastDateChanged,
-                Description = descriptionWithoutCode,
-                Categories = string.Empty,
-                Pdf = pdf,
-                Provider = providerLinkName,
-                Type = TypeText
+                DataRowsToAdd = dataRowsToAdd,
+                DataRowsToUpdate = dataRowsToUpdate,
+                SearchKeyword = keyword,
             };
-
         }
 
         private static (int, Status) SearchInExcel(string code, FileInfo excelFile, DateTime lastDateChanged)
@@ -261,7 +223,7 @@ namespace SoberScrappingTool
 
                 if (foundRow > 0)
                 {
-                    if(!DateTime.TryParseExact(worksheet.Cells[foundRow, 4].Text, DateFormatWanted, null, System.Globalization.DateTimeStyles.None, out var date ))
+                    if (!DateTime.TryParseExact(worksheet.Cells[foundRow, 4].Text, DateFormatWanted, null, System.Globalization.DateTimeStyles.None, out var date))
                     {
                         return (-1, Status.DontAddNorUpdate);
                     }
@@ -314,62 +276,5 @@ namespace SoberScrappingTool
             }
 
         }
-
-        private static void SendEmail(string body)
-        {
-
-            var fromAddress = new MailAddress(SmtpUsername, "No-Reply Sober Scrapping");
-            var toAddress = new MailAddress(EmailAddressToSend, "Mega EL");
-            string subject = "Sober Scrapping: " + DateTime.Now.Date.ToString("dd/MM/yyyy");
-
-            var smtp = new SmtpClient
-            {
-                Host = SmtpHost,
-                Port = SmtpPort,
-                EnableSsl = true,
-                DeliveryMethod = SmtpDeliveryMethod.Network,
-                UseDefaultCredentials = false,
-                Credentials = new NetworkCredential(fromAddress.Address, SmtpPassword),
-
-            };
-            using (var message = new MailMessage(fromAddress, toAddress)
-            {
-                Subject = subject,
-                Body = body,
-                IsBodyHtml = true,
-            })
-            {
-                smtp.Send(message);
-            }
-
-
-            //var client = new SmtpClient("smtp.gmail.com", 587)
-            //{
-            //    Credentials = new NetworkCredential(SmtpUsername, SmtpPassword),
-            //    EnableSsl = true
-            //};
-            //client.Send("no-reply-sober-scrapping@gmail.com", "argigero@gmail.com", subject, body);
-
-
-        }
-    }
-
-    internal enum Status
-    {
-        DontAddNorUpdate,
-        DontAdd,
-        Update,
-        Add
-    }
-
-    public class CustomExcelRow
-    {
-        public string Code { get; set; }
-        public DateTime LastDateChanged { get; set; }
-        public string Pdf { get; set; }
-        public string Provider { get; set; }
-        public string Description { get; set; }
-        public string Type { get; set; }
-        public string Categories { get; set; }
     }
 }
