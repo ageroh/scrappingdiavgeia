@@ -10,6 +10,6 @@ Have fun.
 
 ****
 
-Please email me if any questions to : [mailto](mailto:argigero@gmail.com)
+Please email me if any questions to : [argigero](mailto:argigero@gmail.com)
 
 
